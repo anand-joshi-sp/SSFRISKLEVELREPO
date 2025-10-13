@@ -88,6 +88,30 @@ app.get("/.well-known/jwks.json", (req, res) => {
   res.json({ keys: [publicJwk] });
 });
 
+/* -------------------  SSF Configuration  ------------------- */
+app.get("/.well-known/ssf-configuration", (req, res) => {
+  const base = ISS.endsWith("/") ? ISS.slice(0, -1) : ISS;
+  res.json({
+    issuer: base,
+    jwks_uri: `${base}/.well-known/jwks.json`,
+    registration_endpoint: `${base}/create-stream`,
+    status_endpoint: `${base}/stream-status`,
+    delivery_methods_supported: ["push"],
+    delivery: {
+      push: {
+        endpoint: `${base}/receive`,
+        authorization_header: "Bearer test-api-token-12345"
+      }
+    },
+    events_supported: [
+      "https://schemas.openid.net/secevent/caep/event-type/risk-level-change"
+    ],
+    authorization_types_supported: ["bearer"],
+    signed_set_alg_values_supported: ["RS256"],
+    version: "1.0"
+  });
+});
+
 /* -------------------  Create Stream  ------------------- */
 app.post("/create-stream", async (req, res) => {
   const receiver_stream_url = req.body.receiver_stream_url || DEFAULT_RECEIVER_URL;
