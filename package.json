@@ -1,7 +1,7 @@
 {
   "name": "caep-transmitter",
-  "version": "1.1.0",
-  "description": "CAEP SSF Transmitter supporting stream registration and risk-level-change event sending",
+  "version": "1.2.0",
+  "description": "CAEP SSF Transmitter with built-in env defaults for Render deployment",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,7 +9,6 @@
   "dependencies": {
     "axios": "^1.7.2",
     "body-parser": "^1.20.2",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jose": "^5.3.0",
     "uuid": "^9.0.1"
