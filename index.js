@@ -33,7 +33,7 @@ app.use(bodyParser.json());
 /* ---------- Config ---------- */
 const PORT = process.env.PORT || 3000;
 const API_TOKEN = process.env.API_TOKEN || "Bearer test-api-token-12345";
-const ISS = (process.env.ISS || `http://localhost:${PORT}`).replace(/\/$/, "");
+const ISS = (process.env.ISS || "https://ssfrisklevelrepo.onrender.com").replace(/\/$/, "");
 const DEFAULT_AUD = process.env.AUD || "https://receiver.example.com/";
 const DEFAULT_RECEIVER_URL =
   process.env.DEFAULT_RECEIVER_URL || "https://webhook.site/<your-webhook-id>";
