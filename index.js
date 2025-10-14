@@ -41,7 +41,7 @@ app.use(bodyParser.json({ limit: "1mb" }));
 
 /* ---------- Configuration ---------- */
 const PORT = process.env.PORT || 3000;
-const ISS = (process.env.ISS || `http://localhost:${PORT}`).replace(/\/$/, "");
+const ISS = (process.env.ISS || "https://ssfrisklevelrepo.onrender.com").replace(/\/$/, "");
 const DEFAULT_AUD = process.env.AUD || "https://receiver.example.com/";
 
 /* ---------- Load private key from file (PKCS#8) ---------- */
