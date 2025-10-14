@@ -137,16 +137,23 @@ app.get("/.well-known/jwks.json", (req, res) => res.json({ keys: [publicJwk] }))
 app.get("/.well-known/ssf-configuration", (req, res) => {
   res.json({
     issuer: ISS,
-    jwks_uri: `${ISS}/.well-known/jwks.json`,
-    registration_endpoint: `${ISS}/ssf/streams`,
+    delivery_methods_supported: [
+      "urn:ietf:rfc:8935", // push
+      "urn:ietf:rfc:8936"  // poll
+    ],
+    configuration_endpoint: `${ISS}/ssf/streams`,
     status_endpoint: `${ISS}/ssf/status`,
-    delivery_methods_supported: ["push", "poll"],
-    events_supported: ["https://schemas.openid.net/secevent/caep/event-type/risk-level-change"],
-    authorization_types_supported: ["bearer"],
-    signed_set_alg_values_supported: ["RS256"],
-    version: "1.0",
+    verification_endpoint: `${ISS}/ssf/streams/verify`,
+    jwks_uri: `${ISS}/.well-known/jwks.json`,
+    spec_version: "1_0-ID2",
+    authorization_schemes: [
+      {
+        spec_urn: "urn:ietf:rfc:6749"
+      }
+    ]
   });
 });
+
 
 /* =======================================================
    SSF Stream Management APIs (Raw JSON + Bearer token123)
