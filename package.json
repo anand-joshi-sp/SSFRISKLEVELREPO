@@ -1,14 +1,13 @@
 {
-  "name": "caep-ssf-transmitter-final",
+  "name": "caep-transmitter-spec",
   "version": "1.0.0",
-  "description": "CAEP SSF Transmitter - signed SETs + Bearer token API auth",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "type": "commonjs",
   "dependencies": {
     "axios": "^1.7.2",
-    "body-parser": "^1.20.2",
+    "body-parser": "^1.20.3",
     "express": "^4.19.2",
-    "jose": "^5.2.3",
-    "uuid": "^9.0.1"
+    "jose": "^5.11.3",
+    "uuid": "^9.0.0"
   }
 }
