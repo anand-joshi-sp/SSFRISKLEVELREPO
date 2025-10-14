@@ -170,34 +170,54 @@ app.use("/ssf", (req, res, next) => {
 
 /**
  * CREATE STREAM (Receiver registers with Transmitter)
- * - Accepts raw JSON (not JWT)
- * - Automatically fills missing `aud` and `jwks_uri`
- * - Case-insensitive handling of delivery keys (Delivery / Method / Endpoint)
- * - Returns 201 Created with CAEP/SSF-compliant response
+ * - Accepts raw JSON (CAEP or SSF format)
+ * - Supports both endpoint and endpoint_url
+ * - Normalizes delivery method URIs and trims whitespace
+ * - Auto-fills aud and jwks_uri if missing
  */
 app.post("/ssf/streams", (req, res) => {
   try {
     const body = req.body || {};
 
-    // Default missing values
+    // Auto-defaults for optional fields
     if (!body.aud) body.aud = ISS;
     if (!body.jwks_uri) body.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
-    // Normalize delivery object
+    // Normalize delivery (case-insensitive, CAEP compatible)
     let delivery = body.delivery || body.Delivery || {};
-    delivery = {
-      method:
-        delivery.method ||
-        delivery.Method ||
-        delivery.deliveryMethod ||
-        delivery.DeliveryMethod ||
-        null,
-      endpoint:
-        delivery.endpoint ||
-        delivery.Endpoint ||
-        delivery.url ||
-        delivery.URL ||
-        null,
+    const endpointCandidate =
+      delivery.endpoint ||
+      delivery.Endpoint ||
+      delivery.endpoint_url ||
+      delivery.endpointUrl ||
+      delivery.url ||
+      delivery.URL ||
+      null;
+
+    const methodCandidate =
+      delivery.method ||
+      delivery.Method ||
+      delivery.deliveryMethod ||
+      delivery.DeliveryMethod ||
+      null;
+
+    // Normalize method URIs (convert CAEP push -> RFC push urn)
+    let normalizedMethod = methodCandidate;
+    if (
+      normalizedMethod &&
+      normalizedMethod.includes("https://schemas.openid.net/secevent/caep/delivery-method/push")
+    ) {
+      normalizedMethod = "urn:ietf:rfc:8935";
+    } else if (
+      normalizedMethod &&
+      normalizedMethod.includes("https://schemas.openid.net/secevent/caep/delivery-method/poll")
+    ) {
+      normalizedMethod = "urn:ietf:rfc:8936";
+    }
+
+    const deliveryObj = {
+      method: normalizedMethod ? normalizedMethod.trim() : null,
+      endpoint: endpointCandidate ? endpointCandidate.trim() : null,
       authorization_header:
         delivery.authorization_header ||
         delivery.Authorization ||
@@ -205,19 +225,13 @@ app.post("/ssf/streams", (req, res) => {
         "Bearer token123",
     };
 
-    // Trim whitespace
-    if (typeof delivery.method === "string")
-      delivery.method = delivery.method.trim();
-    if (typeof delivery.endpoint === "string")
-      delivery.endpoint = delivery.endpoint.trim();
-
-    // Validate delivery
-    if (!delivery.method || !delivery.endpoint) {
-      console.warn("⚠️ Invalid delivery object:", delivery);
+    // Validate delivery presence
+    if (!deliveryObj.method || !deliveryObj.endpoint) {
+      console.warn("⚠️ Invalid delivery object:", deliveryObj);
       return res.status(400).json({
         error: "invalid_delivery",
         message:
-          "delivery.method and delivery.endpoint required (case-insensitive)",
+          "delivery.method and delivery.endpoint (or endpoint_url) required",
       });
     }
 
@@ -236,7 +250,7 @@ app.post("/ssf/streams", (req, res) => {
       iss: body.iss,
       aud: body.aud,
       jwks_uri: body.jwks_uri,
-      delivery,
+      delivery: deliveryObj,
       events_requested: body.events_requested,
       events_accepted: body.events_requested,
       description: body.description || null,
@@ -249,10 +263,11 @@ app.post("/ssf/streams", (req, res) => {
     res.status(201).json(stream);
   } catch (err) {
     console.error("create stream error:", err);
-    res.status(500).json({ error: "internal_error", message: err.message });
+    res
+      .status(500)
+      .json({ error: "internal_error", message: err.message || String(err) });
   }
 });
-
 
 /**
  * GET STREAM LIST
