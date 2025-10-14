@@ -148,65 +148,57 @@ app.get("/.well-known/ssf-configuration", (req, res) => {
   });
 });
 
-/* ---------- SPEC-COMPLIANT Endpoints ---------- */
+/* =======================================================
+   SSF Stream Management APIs (Raw JSON + Bearer token123)
+   ======================================================= */
+
+// Middleware to enforce Bearer token for all /ssf routes
+app.use("/ssf", (req, res, next) => {
+  const auth = req.headers.authorization || "";
+  if (auth !== "Bearer token123") {
+    return res.status(401).json({ error: "unauthorized", message: "Missing or invalid Authorization token" });
+  }
+  next();
+});
 
 /**
  * CREATE STREAM (Receiver registers with Transmitter)
- * Expects Content-Type: application/secevent+jwt (signed SET)
- * Verifies SET using jwks_uri included in payload.
- * Responds 201 Created with stream config JSON on success.
+ * - Accepts raw JSON (not JWT)
+ * - Returns 201 Created with stream object
  */
-app.post("/ssf/streams", async (req, res) => {
+app.post("/ssf/streams", (req, res) => {
   try {
-    // raw body may be a JWT string. Ensure we support text body for this route.
-    // express.json already parsed JSON; but we expect a string token in req.body if JSON-literal. Also support raw text if client sends raw JWT.
-    let token;
-    if (typeof req.body === "string") {
-      token = req.body;
-    } else if (req.body && req.body.token && typeof req.body.token === "string") {
-      token = req.body.token;
-    } else {
-      // if content-type is application/secevent+jwt but parser didn't handle it, try raw buffer
-      token = "";
-    }
-    if (!token) {
-      // try reading raw buffer fallback (some clients may send raw)
-      return res.status(400).json({ error: "must_post_signed_set_jwt" });
+    const body = req.body || {};
+    const required = ["iss", "aud", "jwks_uri", "delivery", "events_requested"];
+    const missing = required.filter(f => !(f in body));
+    if (missing.length) {
+      return res.status(400).json({ error: `missing_fields: ${missing.join(", ")}` });
     }
 
-    // Verify incoming SET using receiver's jwks_uri
-    let verified;
-    try {
-      verified = await verifyIncomingSET(token);
-    } catch (err) {
-      return res.status(400).json({ error: "invalid_set", detail: err && err.message ? err.message : String(err) });
+    if (!body.delivery.endpoint || !body.delivery.method) {
+      return res.status(400).json({ error: "invalid_delivery", message: "delivery.method and delivery.endpoint required" });
     }
 
-    const payload = verified.payload;
-
-    // Build stream object from payload per spec fields (delivery, events_requested, jwks_uri, iss)
     const stream_id = uuidv4();
-    const delivery = payload.delivery || null;
-    const events_requested = Array.isArray(payload.events_requested) ? payload.events_requested : [];
-    const jwks_uri = payload.jwks_uri || null;
-    const description = payload.description || null;
-    const status = "enabled";
-
     const stream = {
       stream_id,
-      iss: payload.iss || null,
-      jwks_uri,
-      delivery,
-      events_requested,
-      events_accepted: events_requested.slice(),
-      description,
-      status,
-      created_at: new Date().toISOString(),
+      iss: body.iss,
+      aud: body.aud,
+      jwks_uri: body.jwks_uri,
+      delivery: {
+        method: body.delivery.method,
+        endpoint: body.delivery.endpoint,
+        authorization_header: body.delivery.authorization_header || "Bearer token123"
+      },
+      events_requested: body.events_requested,
+      events_accepted: body.events_requested,
+      description: body.description || null,
+      status: "enabled",
+      created_at: new Date().toISOString()
     };
 
     streams[stream_id] = stream;
-
-    // Respond 201 with stream config (per spec)
+    console.log("✅ Stream created:", stream_id);
     res.status(201).json(stream);
   } catch (err) {
     console.error("create stream error:", err);
@@ -215,104 +207,109 @@ app.post("/ssf/streams", async (req, res) => {
 });
 
 /**
- * GET stream list or single stream
- * - GET /ssf/streams -> list
- * - GET /ssf/streams/:id -> single
- * Both return 200 OK and JSON.
+ * GET STREAM LIST
+ * Returns 200 with array of all registered streams
  */
 app.get("/ssf/streams", (req, res) => {
-  const list = Object.values(streams);
-  res.status(200).json(list);
+  res.status(200).json(Object.values(streams));
 });
 
+/**
+ * GET STREAM DETAILS
+ */
 app.get("/ssf/streams/:id", (req, res) => {
-  const id = req.params.id;
-  const s = streams[id];
+  const s = streams[req.params.id];
   if (!s) return res.status(404).json({ error: "stream_not_found" });
   res.status(200).json(s);
 });
 
 /**
- * PATCH /ssf/streams/:id
- * Accepts JSON with allowed updatable fields: delivery, events_requested, description, status
- * Returns 200 with full updated stream JSON
+ * UPDATE STREAM
+ * Accepts raw JSON updates
+ * Returns 200 with updated stream
  */
-app.patch("/ssf/streams/:id", (req, res) => {
+app.post("/ssf/streams/:id", (req, res) => {
   const id = req.params.id;
   const s = streams[id];
   if (!s) return res.status(404).json({ error: "stream_not_found" });
 
   const updates = req.body || {};
-  if (updates.delivery) s.delivery = Object.assign({}, s.delivery || {}, updates.delivery);
+  if (updates.delivery) s.delivery = { ...s.delivery, ...updates.delivery };
   if (updates.events_requested) {
-    if (!Array.isArray(updates.events_requested)) return res.status(400).json({ error: "invalid_events_requested" });
     s.events_requested = updates.events_requested;
-    s.events_accepted = updates.events_requested.slice();
+    s.events_accepted = updates.events_requested;
   }
   if ("description" in updates) s.description = updates.description;
   if ("status" in updates) s.status = updates.status;
   s.updated_at = new Date().toISOString();
 
+  console.log("🔄 Stream updated:", id);
   res.status(200).json(s);
 });
 
 /**
- * DELETE /ssf/streams?stream_id=...
- * Spec requires deletion using query param. Return 204 No Content on success.
+ * DELETE STREAM
+ * Expects ?stream_id=uuid
+ * Returns 204 on success
  */
-app.delete("/ssf/streams", (req, res) => {
-  const sid = req.query.stream_id;
-  if (!sid) return res.status(400).json({ error: "stream_id_required" });
-  if (!streams[sid]) return res.status(404).json({ error: "stream_not_found" });
-  delete streams[sid];
-  return res.status(204).send();
+app.post("/ssf/streams/:id/delete", (req, res) => {
+  const id = req.params.id;
+  if (!streams[id]) return res.status(404).json({ error: "stream_not_found" });
+  delete streams[id];
+  console.log("❌ Stream deleted:", id);
+  res.status(204).send();
 });
 
 /**
- * POST /ssf/verify
- * Accepts JSON body { stream_id, state? }
- * Responds 204 No Content and sends a Verification SET to the stream.delivery.endpoint (best-effort)
+ * VERIFY STREAM (signed outgoing SET)
+ * Body: { stream_id }
+ * Sends verification SET to delivery.endpoint, returns 202
  */
-app.post("/ssf/verify", async (req, res) => {
-  const { stream_id, state } = req.body || {};
-  if (!stream_id) return res.status(400).json({ error: "stream_id_required" });
+app.post("/ssf/streams/verify", async (req, res) => {
+  const { stream_id } = req.body || {};
   const s = streams[stream_id];
   if (!s) return res.status(404).json({ error: "stream_not_found" });
 
-  const verificationPayload = {
-    jti: uuidv4(),
+  const verifyPayload = {
     iss: ISS,
-    aud: s.delivery && s.delivery.endpoint ? s.delivery.endpoint : DEFAULT_AUD,
-    iat: Math.floor(Date.now() / 1000),
+    aud: s.delivery.endpoint,
     sub_id: { format: "opaque", id: stream_id },
     events: {
-      "https://schemas.openid.net/secevent/ssf/event-type/verification": state ? { state } : {},
-    },
+      "https://schemas.openid.net/secevent/ssf/event-type/verification": {}
+    }
   };
 
-  // sign and send asynchronously, do not block responding 204 per spec example
-  signSET(verificationPayload)
-    .then((signed) => {
-      const headers = { "Content-Type": "application/secevent+jwt" };
-      if (s.delivery && s.delivery.authorization_header) headers["Authorization"] = s.delivery.authorization_header;
-      axios.post(s.delivery.endpoint, signed, { headers }).catch((e) => {
-        console.warn("verification send failed:", e && e.message ? e.message : e);
-      });
-    })
-    .catch((err) => console.warn("signing verification SET failed:", err && err.message ? err.message : err));
+  const signed = await signSET(verifyPayload);
+  const headers = {
+    "Content-Type": "application/secevent+jwt",
+    Authorization: s.delivery.authorization_header
+  };
 
-  return res.status(204).send();
+  axios.post(s.delivery.endpoint, signed, { headers })
+    .then(() => console.log("✅ Sent verification SET to", s.delivery.endpoint))
+    .catch(err => console.error("❌ Verification send failed:", err.message));
+
+  res.status(202).json({ message: "verification_sent", stream_id });
 });
 
-/* ---------- /ssf/status (health & stream summary) ---------- */
+/**
+ * STREAM STATUS
+ * Returns summary of all streams
+ */
 app.get("/ssf/status", (req, res) => {
-  const summary = Object.values(streams).map((s) => ({
+  const summary = Object.values(streams).map(s => ({
     stream_id: s.stream_id,
-    endpoint: s.delivery && s.delivery.endpoint,
-    status: s.status,
+    endpoint: s.delivery.endpoint,
+    status: s.status
   }));
-  res.status(200).json({ status: "active", stream_count: summary.length, streams: summary, time: new Date().toISOString() });
+  res.status(200).json({
+    status: "active",
+    count: summary.length,
+    streams: summary,
+    timestamp: new Date().toISOString()
+  });
 });
+
 
 /* ---------- CAEP event send endpoint ---------- */
 /**
