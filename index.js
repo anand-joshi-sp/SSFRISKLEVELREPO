@@ -171,11 +171,17 @@ app.use("/ssf", (req, res, next) => {
 /**
  * CREATE STREAM (Receiver registers with Transmitter)
  * - Accepts raw JSON (not JWT)
- * - Returns 201 Created with stream object
+ * - Automatically fills missing `aud` and `jwks_uri` fields
+ * - Returns 201 Created with CAEP/SSF-compliant stream object
  */
 app.post("/ssf/streams", (req, res) => {
   try {
     const body = req.body || {};
+
+    // Default values for missing fields
+    if (!body.aud) body.aud = ISS;  // Transmitter itself as audience
+    if (!body.jwks_uri) body.jwks_uri = `${ISS}/.well-known/jwks.json`;
+
     const required = ["iss", "aud", "jwks_uri", "delivery", "events_requested"];
     const missing = required.filter(f => !(f in body));
     if (missing.length) {
@@ -212,6 +218,7 @@ app.post("/ssf/streams", (req, res) => {
     res.status(500).json({ error: "internal_error" });
   }
 });
+
 
 /**
  * GET STREAM LIST
