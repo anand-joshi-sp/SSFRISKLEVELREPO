@@ -171,19 +171,19 @@ app.use("/ssf", (req, res, next) => {
 /**
  * CREATE STREAM (Receiver registers with Transmitter)
  * - Accepts raw JSON (CAEP or SSF format)
- * - Supports both endpoint and endpoint_url
- * - Normalizes delivery method URIs and trims whitespace
- * - Auto-fills aud and jwks_uri if missing
+ * - Supports endpoint_url, endpoint, and CAEP delivery-method URIs
+ * - Auto-fills aud/jwks_uri
+ * - Adds events_delivered per SSF/CAEP 1.0-ID2
  */
 app.post("/ssf/streams", (req, res) => {
   try {
     const body = req.body || {};
 
-    // Auto-defaults for optional fields
+    // Default missing values
     if (!body.aud) body.aud = ISS;
     if (!body.jwks_uri) body.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
-    // Normalize delivery (case-insensitive, CAEP compatible)
+    // Normalize delivery (case-insensitive + CAEP support)
     let delivery = body.delivery || body.Delivery || {};
     const endpointCandidate =
       delivery.endpoint ||
@@ -201,16 +201,20 @@ app.post("/ssf/streams", (req, res) => {
       delivery.DeliveryMethod ||
       null;
 
-    // Normalize method URIs (convert CAEP push -> RFC push urn)
+    // Normalize method URIs → RFC urns
     let normalizedMethod = methodCandidate;
     if (
       normalizedMethod &&
-      normalizedMethod.includes("https://schemas.openid.net/secevent/caep/delivery-method/push")
+      normalizedMethod.includes(
+        "https://schemas.openid.net/secevent/caep/delivery-method/push"
+      )
     ) {
       normalizedMethod = "urn:ietf:rfc:8935";
     } else if (
       normalizedMethod &&
-      normalizedMethod.includes("https://schemas.openid.net/secevent/caep/delivery-method/poll")
+      normalizedMethod.includes(
+        "https://schemas.openid.net/secevent/caep/delivery-method/poll"
+      )
     ) {
       normalizedMethod = "urn:ietf:rfc:8936";
     }
@@ -245,6 +249,8 @@ app.post("/ssf/streams", (req, res) => {
     }
 
     const stream_id = uuidv4();
+    const now = new Date().toISOString();
+
     const stream = {
       stream_id,
       iss: body.iss,
@@ -253,9 +259,11 @@ app.post("/ssf/streams", (req, res) => {
       delivery: deliveryObj,
       events_requested: body.events_requested,
       events_accepted: body.events_requested,
+      events_delivered: body.events_requested, // ✅ NEW FIELD per spec
       description: body.description || null,
       status: "enabled",
-      created_at: new Date().toISOString(),
+      created_at: now,
+      updated_at: now,
     };
 
     streams[stream_id] = stream;
@@ -263,11 +271,10 @@ app.post("/ssf/streams", (req, res) => {
     res.status(201).json(stream);
   } catch (err) {
     console.error("create stream error:", err);
-    res
-      .status(500)
-      .json({ error: "internal_error", message: err.message || String(err) });
+    res.status(500).json({ error: "internal_error", message: err.message });
   }
 });
+
 
 /**
  * GET STREAM LIST
