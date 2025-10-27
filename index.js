@@ -1,6 +1,6 @@
 /**
  * Spec-compliant CAEP / SSF Transmitter (transmitter-only)
- *
+ * -
  * - Reads PKCS#8 private key from ./private_key_pkcs8.pem (required)
  * - POST /ssf/streams accepts a signed SET (application/secevent+jwt) from a Receiver to register a stream
  *   -> verifies signature using jwks_uri present in the SET payload
