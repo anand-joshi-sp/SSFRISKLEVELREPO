@@ -1,6 +1,6 @@
 /**
  * Spec-compliant CAEP / SSF Transmitter (transmitter-only)
- * -
+ *
  * - Reads PKCS#8 private key from ./private_key_pkcs8.pem (required)
  * - POST /ssf/streams accepts a signed SET (application/secevent+jwt) from a Receiver to register a stream
  *   -> verifies signature using jwks_uri present in the SET payload
@@ -42,7 +42,7 @@ app.use(bodyParser.json({ limit: "1mb" }));
 /* ---------- Configuration ---------- */
 const PORT = process.env.PORT || 3000;
 const ISS = (process.env.ISS || "https://ssfrisklevelrepo.onrender.com").replace(/\/$/, "");
-const DEFAULT_AUD = process.env.AUD || "https://receiver.example.com/";
+const DEFAULT_AUD = process.env.AUD || "https://ssfrisklevelrepo.onrender.com/";
 
 /* ---------- Load private key from file (PKCS#8) ---------- */
 const KEY_PATH = path.join(__dirname, "private_key_pkcs8.pem");
