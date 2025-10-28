@@ -3,7 +3,7 @@
  *
  * - Reads PKCS#8 private key from ./private_key_pkcs8.pem (required)
  * - POST /ssf/streams accepts a signed SET (application/secevent+jwt) from a Receiver to register a stream
- *   -> verifies signature using jwks_uri present in the SET payload
+ *  -> verifies signature using jwks_uri present in the SET payload
  * - GET /ssf/streams/:id  -> 200 with stream config
  * - PATCH /ssf/streams/:id -> 200 with updated config
  * - DELETE /ssf/streams?stream_id=... -> 204 No Content
