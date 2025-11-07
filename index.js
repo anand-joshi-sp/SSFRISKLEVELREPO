@@ -145,30 +145,68 @@ app.get("/ssf/status", (req, res) => {
   });
 });
 
-/* ---------- Generic CAEP sender (complex payloads supported) ---------- */
+/**
+ * POST /caep/send-generic
+ * Send CAEP/SSF event (supports nested complex payloads)
+ * Always delivers to a registered stream.
+ *
+ * Body:
+ * {
+ *   "stream_id": "<registered stream_id>",
+ *   "payload": { ... full SET payload ... }
+ * }
+ */
 app.post("/caep/send-generic", async (req, res) => {
   try {
-    const { stream_id, receiver_url, payload } = req.body;
-    if (!payload) return res.status(400).json({ error: "payload_required" });
+    const { stream_id, payload } = req.body || {};
 
-    const s = stream_id ? streams[stream_id] : null;
-    const target = s ? s.delivery.endpoint : receiver_url;
-    const authHeader = s ? s.delivery.authorization_header : BEARER_TOKEN;
+    if (!stream_id) {
+      return res.status(400).json({ error: "stream_id_required" });
+    }
+    const s = streams[stream_id];
+    if (!s) {
+      return res.status(404).json({ error: "stream_not_found" });
+    }
+    if (s.status !== "enabled") {
+      return res.status(400).json({ error: "stream_not_active" });
+    }
 
-    if (!target) return res.status(400).json({ error: "missing_target" });
+    if (!payload || typeof payload !== "object") {
+      return res.status(400).json({ error: "invalid_payload" });
+    }
 
-    // Accept nested complex payloads like you shared
+    // Sign the payload as-is (complex structures allowed)
     const signed = await signSET(payload);
-    const headers = { "Content-Type": "secevent+jwt", Authorization: authHeader };
-    const resp = await axios.post(target, signed, {
+
+    const headers = {
+      "Content-Type": "secevent+jwt",
+      Authorization: s.delivery.authorization_header || BEARER_TOKEN
+    };
+
+    console.log(`📤 Sending SET to ${s.delivery.endpoint} for stream ${stream_id}`);
+
+    const resp = await axios.post(s.delivery.endpoint, signed, {
       headers,
       validateStatus: () => true,
       timeout: 20000
     });
 
-    res.status(200).json({ message: "sent", http_status: resp.status });
+    const status = resp.status || 0;
+    console.log(`✅ Delivered SET to ${s.delivery.endpoint} [${status}]`);
+
+    // Track events delivered (CAEP spec field)
+    s.events_delivered = s.events_delivered || [];
+    s.events_delivered.push(Object.keys(payload.events || {}));
+    s.updated_at = new Date().toISOString();
+
+    res.status(200).json({
+      message: "sent",
+      http_status: status,
+      stream_id,
+      receiver_response: resp.data || null
+    });
   } catch (err) {
-    console.error("send-generic error:", err.message);
+    console.error("❌ send-generic error:", err.message);
     res.status(500).json({ error: "internal_error", message: err.message });
   }
 });
