@@ -150,6 +150,7 @@ app.post("/ssf/streams", (req, res) => {
 
     if (!body.aud) body.aud = ISS;
     if (!body.iss) body.iss = ISS; // default missing iss to our ISS for convenience
+    // NOTE: we **do not** trust client-supplied jwks_uri — use transmitter's JWKS
     if (!body.jwks_uri) body.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
     let delivery = body.delivery || {};
@@ -182,7 +183,8 @@ app.post("/ssf/streams", (req, res) => {
       stream_id: id,
       iss: body.iss,
       aud: body.aud,
-      jwks_uri: body.jwks_uri,
+      // enforce transmitter JWKS — don't accept arbitrary jwks_uri from clients
+      jwks_uri: `${ISS}/.well-known/jwks.json`,
       delivery: {
         method,
         endpoint_url: endpoint,
@@ -241,6 +243,9 @@ app.post("/ssf/streams/:id", (req, res) => {
   }
   if ("description" in updates) s.description = updates.description;
   if ("status" in updates) s.status = updates.status;
+
+  // DO NOT allow clients to change jwks_uri — keep jwks_uri pointing to transmitter's JWKS
+  s.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
   s.updated_at = new Date().toISOString();
   res.json(s);
