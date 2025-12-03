@@ -117,9 +117,19 @@ app.get("/.well-known/ssf-configuration", (req, res) => {
 });
 
 /* ------------------- AUTH MIDDLEWARE ------------------- */
+/*
+  Expect Authorization: Bearer <token>
+  Token value is validated against process.env.SSF_AUTH_TOKEN || "token123"
+*/
 app.use("/ssf", (req, res, next) => {
-  if (req.headers.authorization !== "Bearer token123") {
-    return res.status(401).json({ error: "unauthorized" });
+  const auth = req.headers.authorization || "";
+  if (!auth.toLowerCase().startsWith("bearer ")) {
+    return res.status(401).json({ error: "unauthorized", message: "missing_bearer_token" });
+  }
+  const token = auth.slice(7).trim();
+  const expected = process.env.SSF_AUTH_TOKEN || "token123";
+  if (!token || token !== expected) {
+    return res.status(401).json({ error: "unauthorized", message: "invalid_token" });
   }
   next();
 });
@@ -133,8 +143,10 @@ app.post("/ssf/streams", (req, res) => {
     if (!body.jwks_uri) body.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
     let delivery = body.delivery || {};
+    // Prefer delivery.endpoint_url (user requested canonical rename)
     const endpoint =
       delivery.endpoint_url ||
+      delivery.endpoint ||
       delivery.URL ||
       delivery.url;
 
@@ -143,7 +155,7 @@ app.post("/ssf/streams", (req, res) => {
     if (!endpoint || !method) {
       return res.status(400).json({
         error: "invalid_delivery",
-        message: "delivery.method and delivery.endpoint required",
+        message: "delivery.method and delivery.endpoint_url required",
       });
     }
 
@@ -163,7 +175,7 @@ app.post("/ssf/streams", (req, res) => {
       jwks_uri: body.jwks_uri,
       delivery: {
         method,
-        endpoint,
+        endpoint_url: endpoint,
         authorization_header: delivery.authorization_header || "Bearer token123",
       },
       events_requested: body.events_requested,
@@ -203,7 +215,14 @@ app.post("/ssf/streams/:id", (req, res) => {
   const updates = req.body || {};
 
   if (updates.delivery) {
-    s.delivery = { ...s.delivery, ...updates.delivery };
+    // merge delivery but respect endpoint_url canonical field
+    const newDelivery = { ...s.delivery, ...updates.delivery };
+    // normalize possible endpoint keys from update
+    const ep =
+      (updates.delivery.endpoint_url || updates.delivery.endpoint || updates.delivery.URL || updates.delivery.url) ||
+      newDelivery.endpoint_url;
+    newDelivery.endpoint_url = ep;
+    s.delivery = newDelivery;
   }
   if (updates.events_requested) {
     s.events_requested = updates.events_requested;
@@ -236,7 +255,7 @@ app.post("/ssf/streams/verify", async (req, res) => {
 
   const verifyPayload = {
     iss: ISS,
-    aud: s.delivery.endpoint,
+    aud: s.delivery.endpoint_url,
     sub_id: { format: "opaque", id: stream_id },
     events: { [eventType]: {} }
   };
@@ -248,19 +267,19 @@ app.post("/ssf/streams/verify", async (req, res) => {
     Authorization: s.delivery.authorization_header
   };
 
-  axios.post(s.delivery.endpoint, signed, { headers })
-    .then(() => console.warn(`🔐 Verification SET sent → ${s.delivery.endpoint}`))
+  axios.post(s.delivery.endpoint_url, signed, { headers })
+    .then(() => console.warn(`🔐 Verification SET sent → ${s.delivery.endpoint_url}`))
     .catch(err => console.warn(`❌ Verification send failed: ${err.message}`));
 
   res.status(202).json({ message: "verification_sent", stream_id });
 });
 
 
-/* ------------------- STREAM STATUS ------------------- */
+/* ------------------- STREAM STATUS (GET summary) ------------------- */
 app.get("/ssf/status", (req, res) => {
   const summary = Object.values(streams).map(s => ({
     stream_id: s.stream_id,
-    endpoint: s.delivery.endpoint,
+    endpoint: s.delivery.endpoint_url,
     status: s.status
   }));
 
@@ -272,6 +291,35 @@ app.get("/ssf/status", (req, res) => {
   });
 });
 
+/* ------------------- STREAM STATUS (POST update) ------------------- */
+/*
+  CAEP-ish status update endpoint:
+  Accepts: { "stream_id": "...", "status": "enabled" }
+  Returns updated stream object on success.
+*/
+app.post("/ssf/status", (req, res) => {
+  try {
+    const { stream_id, status } = req.body || {};
+    if (!stream_id) return res.status(400).json({ error: "stream_id_required" });
+    if (!status) return res.status(400).json({ error: "status_required" });
+
+    const allowed = ["enabled", "disabled", "verification_pending", "failed"];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: "invalid_status", message: `allowed: ${allowed.join(", ")}` });
+    }
+
+    const s = streams[stream_id];
+    if (!s) return res.status(404).json({ error: "stream_not_found" });
+
+    s.status = status;
+    s.updated_at = new Date().toISOString();
+
+    res.status(200).json(s);
+  } catch (err) {
+    console.error("status update error:", err.message);
+    res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
 
 /* ============================================================
    SHARED METRICS (for all CAEP event send endpoints)
@@ -280,24 +328,30 @@ if (!global.metrics) {
   global.metrics = {
     risk: { sent: 0, success: 0, failed: 0 },
     status: { sent: 0, success: 0, failed: 0 },
-    device: { sent: 0, success: 0, failed: 0 }
+    device: { sent: 0, success: 0, failed: 0 },
+    token_claim: { sent: 0, success: 0, failed: 0 } // added for token-claim-change events
   };
 }
 
 function logEvent(type, endpoint, resp) {
   const m = global.metrics[type];
-  m.sent++;
+  if (!m) {
+    // initialize unknown metric types defensively
+    global.metrics[type] = { sent: 0, success: 0, failed: 0 };
+  }
+  const mm = global.metrics[type];
+  mm.sent++;
 
   const ok = resp.status >= 200 && resp.status < 300;
-  if (ok) m.success++;
-  else m.failed++;
+  if (ok) mm.success++;
+  else mm.failed++;
 
   console.warn(
     `${ok ? "✅" : "❌"} [${type.toUpperCase()} EVENT DELIVERY]\n` +
     `→ Target: ${endpoint}\n` +
     `→ HTTP: ${resp.status}\n` +
     `→ Body: ${JSON.stringify(resp.data)}\n` +
-    `→ Stats: sent=${m.sent}, success=${m.success}, failed=${m.failed}`
+    `→ Stats: sent=${mm.sent}, success=${mm.success}, failed=${mm.failed}`
   );
 }
 
@@ -318,7 +372,7 @@ app.post("/caep/send-risk-level-change", async (req, res) => {
       const s = streams[stream_id];
       if (!s) return res.status(404).json({ error: "stream_not_found" });
 
-      target = s.delivery.endpoint;
+      target = s.delivery.endpoint_url;
       authHeader = s.delivery.authorization_header;
     } else if (receiver_url) {
       target = receiver_url;
@@ -404,10 +458,10 @@ app.post("/caep/send-status-change", async (req, res) => {
     };
 
     const resp = await axios
-      .post(s.delivery.endpoint, signed, { headers, validateStatus: () => true })
+      .post(s.delivery.endpoint_url, signed, { headers, validateStatus: () => true })
       .catch(e => e.response || { status: 500, data: String(e) });
 
-    logEvent("status", s.delivery.endpoint, resp);
+    logEvent("status", s.delivery.endpoint_url, resp);
 
     res.status(200).json({
       message: "status_change_sent",
@@ -419,6 +473,7 @@ app.post("/caep/send-status-change", async (req, res) => {
     res.status(500).json({ error: "internal_error", message: err.message });
   }
 });
+
 /* ============================================================
    CAEP EVENT: DEVICE COMPLIANCE CHANGE
    ============================================================ */
@@ -460,14 +515,14 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
     };
 
     const resp = await axios
-      .post(s.delivery.endpoint, signed, {
+      .post(s.delivery.endpoint_url, signed, {
         headers,
         validateStatus: () => true,
         timeout: 20000,
       })
       .catch((e) => e.response || { status: 500, data: String(e) });
 
-    logEvent("device", s.delivery.endpoint, resp);
+    logEvent("device", s.delivery.endpoint_url, resp);
 
     res.status(200).json({
       message: "device_compliance_change_sent",
@@ -479,6 +534,85 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
     res.status(500).json({ error: "internal_error", message: err.message });
   }
 });
+
+/* ============================================================
+   CAEP EVENT: TOKEN CLAIM CHANGE (new)
+   ============================================================
+   CAEP event type: https://schemas.openid.net/secevent/caep/event-type/token-claim-change
+   Payload expected (example):
+   {
+     "aud": "https://receiver.example.com",
+     "sub_id": { "format": "opaque", "id": "user-123" },
+     "principal": "alice@example.com",
+     "claim_name": "roles",
+     "previous_value": "user",
+     "current_value": "admin",
+     "event_timestamp": "2025-12-03T09:30:00Z"
+   }
+*/
+app.post("/caep/send-token-claim-change", async (req, res) => {
+  try {
+    const { stream_id, receiver_url, payload } = req.body || {};
+
+    if (!payload || !payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) {
+      return res.status(400).json({ error: "payload.claim_name_and_current_value_required" });
+    }
+
+    let target, authHeader;
+
+    if (stream_id) {
+      const s = streams[stream_id];
+      if (!s) return res.status(404).json({ error: "stream_not_found" });
+
+      target = s.delivery.endpoint_url;
+      authHeader = s.delivery.authorization_header;
+    } else if (receiver_url) {
+      target = receiver_url;
+      authHeader = req.body.authorization_header || null;
+    } else {
+      return res.status(400).json({ error: "stream_id_or_receiver_url_required" });
+    }
+
+    const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claim-change";
+
+    const setPayload = {
+      iss: ISS,
+      aud: payload.aud || DEFAULT_AUD,
+      sub_id: payload.sub_id || (payload.principal ? { format: "opaque", id: payload.principal } : { format: "opaque", id: "unknown" }),
+      events: {
+        [eventType]: {
+          ...(payload.principal ? { principal: payload.principal } : {}),
+          claim_name: payload.claim_name,
+          current_value: payload.current_value,
+          ...(typeof payload.previous_value !== "undefined" && payload.previous_value !== null ? { previous_value: payload.previous_value } : {}),
+          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+          ...(payload.metadata ? { metadata: payload.metadata } : {}) // optional additional metadata
+        }
+      }
+    };
+
+    const signed = await signSET(setPayload);
+
+    const headers = { "Content-Type": "application/secevent+jwt" };
+    if (authHeader) headers["Authorization"] = authHeader;
+
+    const resp = await axios
+      .post(target, signed, { headers, validateStatus: () => true, timeout: 20000 })
+      .catch(e => e.response || { status: 500, data: String(e) });
+
+    logEvent("token_claim", target, resp);
+
+    res.status(200).json({
+      message: "token_claim_change_sent",
+      http_status: resp.status,
+      receiver_response: resp.data || null,
+    });
+  } catch (err) {
+    console.error("token-claim-change error:", err.message);
+    res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
+
 /* Root */
 app.get("/", (req, res) => {
   res.json({
