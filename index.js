@@ -134,12 +134,22 @@ app.use("/ssf", (req, res, next) => {
   next();
 });
 
+/* ------------------- Helpers ------------------- */
+function normalizeTimestamp(ts) {
+  if (!ts && ts !== 0) return undefined;
+  if (typeof ts === "number") return ts;
+  const d = new Date(ts);
+  if (!isNaN(d)) return Math.floor(d.getTime() / 1000);
+  return undefined;
+}
+
 /* ------------------- CREATE STREAM ------------------- */
 app.post("/ssf/streams", (req, res) => {
   try {
     const body = req.body || {};
 
     if (!body.aud) body.aud = ISS;
+    if (!body.iss) body.iss = ISS; // default missing iss to our ISS for convenience
     if (!body.jwks_uri) body.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
     let delivery = body.delivery || {};
@@ -393,7 +403,7 @@ app.post("/caep/send-risk-level-change", async (req, res) => {
           current_level: String(payload.current_level).toUpperCase(),
           ...(payload.previous_level ? { previous_level: String(payload.previous_level).toUpperCase() } : {}),
           ...(payload.risk_reason ? { risk_reason: payload.risk_reason } : {}),
-          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+          ...(payload.event_timestamp ? { event_timestamp: normalizeTimestamp(payload.event_timestamp) } : {}),
         },
       },
     };
@@ -445,7 +455,7 @@ app.post("/caep/send-status-change", async (req, res) => {
           current_status: payload.current_status,
           ...(payload.previous_status ? { previous_status: payload.previous_status } : {}),
           ...(payload.reason ? { reason: payload.reason } : {}),
-          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {})
+          ...(payload.event_timestamp ? { event_timestamp: normalizeTimestamp(payload.event_timestamp) } : {})
         }
       }
     };
@@ -501,7 +511,7 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
             ? { previous_status: payload.previous_status }
             : {}),
           ...(payload.event_timestamp
-            ? { event_timestamp: payload.event_timestamp }
+            ? { event_timestamp: normalizeTimestamp(payload.event_timestamp) }
             : {}),
         },
       },
@@ -537,6 +547,7 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
 
 /* ============================================================
    CAEP EVENT: TOKEN CLAIM CHANGE (updated to include initiating_entity, txn, reasons, claims)
+   event type: token-claims-change (plural) to match sample
    ============================================================ */
 app.post("/caep/send-token-claim-change", async (req, res) => {
   try {
@@ -561,7 +572,7 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
       return res.status(400).json({ error: "stream_id_or_receiver_url_required" });
     }
 
-    const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claim-change";
+    const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claims-change";
 
     // Build claims object:
     // - prefer payload.claims (object)
@@ -571,28 +582,20 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
       claimsObj = payload.claims;
     } else if (payload.claim_name) {
       claimsObj[payload.claim_name] = payload.current_value;
-      if (typeof payload.previous_value !== "undefined" && payload.previous_value !== null) {
-        // embed previous in a nested object if you prefer; but to keep it simple we attach separate field
-        // We'll also include previous values in a sibling structure (previous_claims) to preserve history if needed
-        // For CAEP style like your example, we'll place only the new values under "claims"
-        // and include previous_value as separate field in events object.
-      }
     }
 
     // Prepare event object following your example structure
+    const normalizedEventTimestamp = normalizeTimestamp(payload.event_timestamp);
     const eventBody = {
-      // event_timestamp: may be numeric epoch or ISO string; accept what user provides
-      ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+      ...(typeof normalizedEventTimestamp !== "undefined" ? { event_timestamp: normalizedEventTimestamp } : {}),
       ...(payload.initiating_entity ? { initiating_entity: payload.initiating_entity } : {}),
       ...(payload.reason_admin ? { reason_admin: payload.reason_admin } : {}),
       ...(payload.reason_user ? { reason_user: payload.reason_user } : {}),
-      // include a 'claims' object similar to your sample
       claims: claimsObj
     };
 
     // if user provided previous_value for a single claim, include it explicitly
     if (!payload.claims && typeof payload.previous_value !== "undefined" && payload.previous_value !== null && payload.claim_name) {
-      // include previous value under a sibling property for clarity
       eventBody.previous_value = payload.previous_value;
     }
 
@@ -628,6 +631,17 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
     console.error("token-claim-change error:", err.message);
     res.status(500).json({ error: "internal_error", message: err.message });
   }
+});
+
+/* Root */
+app.get("/", (req, res) => {
+  res.json({
+    message: "Spec-compliant SSF/CAEP Transmitter",
+    issuer: ISS,
+    discovery: `${ISS}/.well-known/ssf-configuration`,
+    jwks: `${ISS}/.well-known/jwks.json`,
+    metrics: global.metrics || {}
+  });
 });
 
 /* ---------- Start server ---------- */
