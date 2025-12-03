@@ -536,26 +536,16 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
 });
 
 /* ============================================================
-   CAEP EVENT: TOKEN CLAIM CHANGE (new)
-   ============================================================
-   CAEP event type: https://schemas.openid.net/secevent/caep/event-type/token-claim-change
-   Payload expected (example):
-   {
-     "aud": "https://receiver.example.com",
-     "sub_id": { "format": "opaque", "id": "user-123" },
-     "principal": "alice@example.com",
-     "claim_name": "roles",
-     "previous_value": "user",
-     "current_value": "admin",
-     "event_timestamp": "2025-12-03T09:30:00Z"
-   }
-*/
+   CAEP EVENT: TOKEN CLAIM CHANGE (enhanced; single-claim and claims-object supported,
+   optional initiating_entity/reasons/txn included when provided)
+   ============================================================ */
 app.post("/caep/send-token-claim-change", async (req, res) => {
   try {
     const { stream_id, receiver_url, payload } = req.body || {};
 
-    if (!payload || !payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) {
-      return res.status(400).json({ error: "payload.claim_name_and_current_value_required" });
+    // Accept either a single claim (claim_name + current_value) OR a claims object
+    if (!payload || ( !payload.claims && (!payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) )) {
+      return res.status(400).json({ error: "payload.claims_or_claim_name_and_current_value_required" });
     }
 
     let target, authHeader;
@@ -575,19 +565,35 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
 
     const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claim-change";
 
+    // Build claims object
+    let claimsObj = {};
+    if (payload.claims && typeof payload.claims === "object") {
+      claimsObj = payload.claims;
+    } else if (payload.claim_name) {
+      claimsObj[payload.claim_name] = payload.current_value;
+    }
+
+    // Build event body including optional fields
+    const eventBody = {
+      ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+      ...(payload.initiating_entity ? { initiating_entity: payload.initiating_entity } : {}),
+      ...(payload.reason_admin ? { reason_admin: payload.reason_admin } : {}),
+      ...(payload.reason_user ? { reason_user: payload.reason_user } : {}),
+      claims: claimsObj
+    };
+
+    // include previous_value field if a single-claim previous_value is provided
+    if (!payload.claims && typeof payload.previous_value !== "undefined" && payload.previous_value !== null && payload.claim_name) {
+      eventBody.previous_value = payload.previous_value;
+    }
+
     const setPayload = {
       iss: ISS,
       aud: payload.aud || DEFAULT_AUD,
+      ...(payload.txn ? { txn: payload.txn } : {}), // include txn at top-level if provided
       sub_id: payload.sub_id || (payload.principal ? { format: "opaque", id: payload.principal } : { format: "opaque", id: "unknown" }),
       events: {
-        [eventType]: {
-          ...(payload.principal ? { principal: payload.principal } : {}),
-          claim_name: payload.claim_name,
-          current_value: payload.current_value,
-          ...(typeof payload.previous_value !== "undefined" && payload.previous_value !== null ? { previous_value: payload.previous_value } : {}),
-          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
-          ...(payload.metadata ? { metadata: payload.metadata } : {}) // optional additional metadata
-        }
+        [eventType]: eventBody
       }
     };
 
@@ -636,4 +642,3 @@ initKeys()
     console.error("Key init failed:", err);
     process.exit(1);
   });
-
