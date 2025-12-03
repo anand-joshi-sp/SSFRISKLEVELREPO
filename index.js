@@ -536,26 +536,14 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
 });
 
 /* ============================================================
-   CAEP EVENT: TOKEN CLAIM CHANGE (new)
-   ============================================================
-   CAEP event type: https://schemas.openid.net/secevent/caep/event-type/token-claim-change
-   Payload expected (example):
-   {
-     "aud": "https://receiver.example.com",
-     "sub_id": { "format": "opaque", "id": "user-123" },
-     "principal": "alice@example.com",
-     "claim_name": "roles",
-     "previous_value": "user",
-     "current_value": "admin",
-     "event_timestamp": "2025-12-03T09:30:00Z"
-   }
-*/
+   CAEP EVENT: TOKEN CLAIM CHANGE (updated to include initiating_entity, txn, reasons, claims)
+   ============================================================ */
 app.post("/caep/send-token-claim-change", async (req, res) => {
   try {
     const { stream_id, receiver_url, payload } = req.body || {};
 
-    if (!payload || !payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) {
-      return res.status(400).json({ error: "payload.claim_name_and_current_value_required" });
+    if (!payload || ( !payload.claims && (!payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) )) {
+      return res.status(400).json({ error: "payload.claims_or_claim_name_and_current_value_required" });
     }
 
     let target, authHeader;
@@ -575,19 +563,48 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
 
     const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claim-change";
 
+    // Build claims object:
+    // - prefer payload.claims (object)
+    // - else use claim_name/current_value (and previous_value)
+    let claimsObj = {};
+    if (payload.claims && typeof payload.claims === "object") {
+      claimsObj = payload.claims;
+    } else if (payload.claim_name) {
+      claimsObj[payload.claim_name] = payload.current_value;
+      if (typeof payload.previous_value !== "undefined" && payload.previous_value !== null) {
+        // embed previous in a nested object if you prefer; but to keep it simple we attach separate field
+        // We'll also include previous values in a sibling structure (previous_claims) to preserve history if needed
+        // For CAEP style like your example, we'll place only the new values under "claims"
+        // and include previous_value as separate field in events object.
+      }
+    }
+
+    // Prepare event object following your example structure
+    const eventBody = {
+      // event_timestamp: may be numeric epoch or ISO string; accept what user provides
+      ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+      ...(payload.initiating_entity ? { initiating_entity: payload.initiating_entity } : {}),
+      ...(payload.reason_admin ? { reason_admin: payload.reason_admin } : {}),
+      ...(payload.reason_user ? { reason_user: payload.reason_user } : {}),
+      // include a 'claims' object similar to your sample
+      claims: claimsObj
+    };
+
+    // if user provided previous_value for a single claim, include it explicitly
+    if (!payload.claims && typeof payload.previous_value !== "undefined" && payload.previous_value !== null && payload.claim_name) {
+      // include previous value under a sibling property for clarity
+      eventBody.previous_value = payload.previous_value;
+    }
+
     const setPayload = {
       iss: ISS,
       aud: payload.aud || DEFAULT_AUD,
+      // include txn if provided so the final JWT payload contains it (matches your example)
+      ...(payload.txn ? { txn: payload.txn } : {}),
+      // sub_id can be a nested object (eg. jwt_id style) or simple opaque id
       sub_id: payload.sub_id || (payload.principal ? { format: "opaque", id: payload.principal } : { format: "opaque", id: "unknown" }),
       events: {
-        [eventType]: {
-          ...(payload.principal ? { principal: payload.principal } : {}),
-          claim_name: payload.claim_name,
-          current_value: payload.current_value,
-          ...(typeof payload.previous_value !== "undefined" && payload.previous_value !== null ? { previous_value: payload.previous_value } : {}),
-          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
-          ...(payload.metadata ? { metadata: payload.metadata } : {}) // optional additional metadata
-        }
+        [eventType]: eventBody
       }
     };
 
@@ -611,17 +628,6 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
     console.error("token-claim-change error:", err.message);
     res.status(500).json({ error: "internal_error", message: err.message });
   }
-});
-
-/* Root */
-app.get("/", (req, res) => {
-  res.json({
-    message: "Spec-compliant SSF/CAEP Transmitter",
-    issuer: ISS,
-    discovery: `${ISS}/.well-known/ssf-configuration`,
-    jwks: `${ISS}/.well-known/jwks.json`,
-    metrics: global.metrics
-  });
 });
 
 /* ---------- Start server ---------- */
