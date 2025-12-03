@@ -134,23 +134,12 @@ app.use("/ssf", (req, res, next) => {
   next();
 });
 
-/* ------------------- Helpers ------------------- */
-function normalizeTimestamp(ts) {
-  if (!ts && ts !== 0) return undefined;
-  if (typeof ts === "number") return ts;
-  const d = new Date(ts);
-  if (!isNaN(d)) return Math.floor(d.getTime() / 1000);
-  return undefined;
-}
-
 /* ------------------- CREATE STREAM ------------------- */
 app.post("/ssf/streams", (req, res) => {
   try {
     const body = req.body || {};
 
     if (!body.aud) body.aud = ISS;
-    if (!body.iss) body.iss = ISS; // default missing iss to our ISS for convenience
-    // NOTE: we **do not** trust client-supplied jwks_uri — use transmitter's JWKS
     if (!body.jwks_uri) body.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
     let delivery = body.delivery || {};
@@ -183,8 +172,7 @@ app.post("/ssf/streams", (req, res) => {
       stream_id: id,
       iss: body.iss,
       aud: body.aud,
-      // enforce transmitter JWKS — don't accept arbitrary jwks_uri from clients
-      jwks_uri: `${ISS}/.well-known/jwks.json`,
+      jwks_uri: body.jwks_uri,
       delivery: {
         method,
         endpoint_url: endpoint,
@@ -243,9 +231,6 @@ app.post("/ssf/streams/:id", (req, res) => {
   }
   if ("description" in updates) s.description = updates.description;
   if ("status" in updates) s.status = updates.status;
-
-  // DO NOT allow clients to change jwks_uri — keep jwks_uri pointing to transmitter's JWKS
-  s.jwks_uri = `${ISS}/.well-known/jwks.json`;
 
   s.updated_at = new Date().toISOString();
   res.json(s);
@@ -408,7 +393,7 @@ app.post("/caep/send-risk-level-change", async (req, res) => {
           current_level: String(payload.current_level).toUpperCase(),
           ...(payload.previous_level ? { previous_level: String(payload.previous_level).toUpperCase() } : {}),
           ...(payload.risk_reason ? { risk_reason: payload.risk_reason } : {}),
-          ...(payload.event_timestamp ? { event_timestamp: normalizeTimestamp(payload.event_timestamp) } : {}),
+          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
         },
       },
     };
@@ -460,7 +445,7 @@ app.post("/caep/send-status-change", async (req, res) => {
           current_status: payload.current_status,
           ...(payload.previous_status ? { previous_status: payload.previous_status } : {}),
           ...(payload.reason ? { reason: payload.reason } : {}),
-          ...(payload.event_timestamp ? { event_timestamp: normalizeTimestamp(payload.event_timestamp) } : {})
+          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {})
         }
       }
     };
@@ -516,7 +501,7 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
             ? { previous_status: payload.previous_status }
             : {}),
           ...(payload.event_timestamp
-            ? { event_timestamp: normalizeTimestamp(payload.event_timestamp) }
+            ? { event_timestamp: payload.event_timestamp }
             : {}),
         },
       },
@@ -551,15 +536,26 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
 });
 
 /* ============================================================
-   CAEP EVENT: TOKEN CLAIM CHANGE (updated to include initiating_entity, txn, reasons, claims)
-   event type: token-claims-change (plural) to match sample
-   ============================================================ */
+   CAEP EVENT: TOKEN CLAIM CHANGE (new)
+   ============================================================
+   CAEP event type: https://schemas.openid.net/secevent/caep/event-type/token-claim-change
+   Payload expected (example):
+   {
+     "aud": "https://receiver.example.com",
+     "sub_id": { "format": "opaque", "id": "user-123" },
+     "principal": "alice@example.com",
+     "claim_name": "roles",
+     "previous_value": "user",
+     "current_value": "admin",
+     "event_timestamp": "2025-12-03T09:30:00Z"
+   }
+*/
 app.post("/caep/send-token-claim-change", async (req, res) => {
   try {
     const { stream_id, receiver_url, payload } = req.body || {};
 
-    if (!payload || ( !payload.claims && (!payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) )) {
-      return res.status(400).json({ error: "payload.claims_or_claim_name_and_current_value_required" });
+    if (!payload || !payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) {
+      return res.status(400).json({ error: "payload.claim_name_and_current_value_required" });
     }
 
     let target, authHeader;
@@ -577,42 +573,21 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
       return res.status(400).json({ error: "stream_id_or_receiver_url_required" });
     }
 
-    const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claims-change";
-
-    // Build claims object:
-    // - prefer payload.claims (object)
-    // - else use claim_name/current_value (and previous_value)
-    let claimsObj = {};
-    if (payload.claims && typeof payload.claims === "object") {
-      claimsObj = payload.claims;
-    } else if (payload.claim_name) {
-      claimsObj[payload.claim_name] = payload.current_value;
-    }
-
-    // Prepare event object following your example structure
-    const normalizedEventTimestamp = normalizeTimestamp(payload.event_timestamp);
-    const eventBody = {
-      ...(typeof normalizedEventTimestamp !== "undefined" ? { event_timestamp: normalizedEventTimestamp } : {}),
-      ...(payload.initiating_entity ? { initiating_entity: payload.initiating_entity } : {}),
-      ...(payload.reason_admin ? { reason_admin: payload.reason_admin } : {}),
-      ...(payload.reason_user ? { reason_user: payload.reason_user } : {}),
-      claims: claimsObj
-    };
-
-    // if user provided previous_value for a single claim, include it explicitly
-    if (!payload.claims && typeof payload.previous_value !== "undefined" && payload.previous_value !== null && payload.claim_name) {
-      eventBody.previous_value = payload.previous_value;
-    }
+    const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claim-change";
 
     const setPayload = {
       iss: ISS,
       aud: payload.aud || DEFAULT_AUD,
-      // include txn if provided so the final JWT payload contains it (matches your example)
-      ...(payload.txn ? { txn: payload.txn } : {}),
-      // sub_id can be a nested object (eg. jwt_id style) or simple opaque id
       sub_id: payload.sub_id || (payload.principal ? { format: "opaque", id: payload.principal } : { format: "opaque", id: "unknown" }),
       events: {
-        [eventType]: eventBody
+        [eventType]: {
+          ...(payload.principal ? { principal: payload.principal } : {}),
+          claim_name: payload.claim_name,
+          current_value: payload.current_value,
+          ...(typeof payload.previous_value !== "undefined" && payload.previous_value !== null ? { previous_value: payload.previous_value } : {}),
+          ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+          ...(payload.metadata ? { metadata: payload.metadata } : {}) // optional additional metadata
+        }
       }
     };
 
@@ -645,7 +620,7 @@ app.get("/", (req, res) => {
     issuer: ISS,
     discovery: `${ISS}/.well-known/ssf-configuration`,
     jwks: `${ISS}/.well-known/jwks.json`,
-    metrics: global.metrics || {}
+    metrics: global.metrics
   });
 });
 
@@ -661,3 +636,4 @@ initKeys()
     console.error("Key init failed:", err);
     process.exit(1);
   });
+
