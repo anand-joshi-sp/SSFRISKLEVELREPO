@@ -134,7 +134,6 @@ app.post("/ssf/streams", (req, res) => {
 
     let delivery = body.delivery || {};
     const endpoint =
-      delivery.endpoint ||
       delivery.endpoint_url ||
       delivery.URL ||
       delivery.url;
