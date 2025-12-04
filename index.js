@@ -1,12 +1,8 @@
 /**
- * Spec-compliant CAEP / SSF Transmitter (transmitter-only)
- *
- * Fixes applied:
- * - Ensure stream delete actually removes the stream
- * - Fix stray `If` -> `if` in update route
- * - Fix status-change handler to use stream_id (not req.params.id)
- *
- * No other behaviour changed.
+ * Final index.js
+ * - Fixes: delete actually deletes
+ * - Adds: PATCH /ssf/streams/:id (partial update)
+ * - Keeps: all previously agreed CAEP behaviour (verify, status per-stream, token-claims-change, complex sub_id)
  */
 
 const fs = require("fs");
@@ -214,43 +210,92 @@ app.get("/ssf/streams/:id", (req, res) => {
   res.json(s);
 });
 
-/* ------------------- UPDATE STREAM ------------------- */
+/* ------------------- UPDATE STREAM (POST - legacy) ------------------- */
 app.post("/ssf/streams/:id", (req, res) => {
-  const s = streams[req.params.id];
-  if (!s) return res.status(404).json({ error: "stream_not_found" });
-
-  const updates = req.body || {};
-
-  if (updates.delivery) {
-    // merge delivery but respect endpoint_url canonical field
-    const newDelivery = { ...s.delivery, ...updates.delivery };
-    // normalize possible endpoint keys from update
-    const ep =
-      (updates.delivery.endpoint_url || updates.delivery.endpoint || updates.delivery.URL || updates.delivery.url) ||
-      newDelivery.endpoint_url;
-    newDelivery.endpoint_url = ep;
-    s.delivery = newDelivery;
-  }
-  if (updates.events_requested) {
-    s.events_requested = updates.events_requested;
-    s.events_accepted = updates.events_requested;
-    s.events_delivered = updates.events_requested;
-  }
-  if ("description" in updates) s.description = updates.description;
-  if ("status" in updates) s.status = updates.status;
-
-  s.updated_at = new Date().toISOString();
-  res.json(s);
+  return handleStreamUpdate(req, res);
 });
 
-/* ------------------- DELETE STREAM ------------------- */
+/* ------------------- UPDATE STREAM (PATCH - preferred) ------------------- */
+app.patch("/ssf/streams/:id", (req, res) => {
+  return handleStreamUpdate(req, res);
+});
+
+/* centralised update logic used by both POST and PATCH */
+function handleStreamUpdate(req, res) {
+  const id = req.params.id;
+  const s = streams[id];
+  if (!s) return res.status(404).json({ error: "stream_not_found" });
+
+  try {
+    const updates = req.body || {};
+
+    // delivery merge: accept delivery.* fields and normalize endpoint_url
+    if (updates.delivery) {
+      const incoming = updates.delivery || {};
+      const newDelivery = { ...s.delivery, ...incoming };
+
+      const ep =
+        (incoming.endpoint_url || incoming.endpoint || incoming.URL || incoming.url) ||
+        newDelivery.endpoint_url;
+
+      // Only overwrite endpoint_url if we have a non-empty value
+      if (ep) newDelivery.endpoint_url = ep;
+
+      // If incoming.method is provided and non-empty, update it
+      if (incoming.method) newDelivery.method = incoming.method;
+
+      // optional: allow update of authorization_header
+      if (typeof incoming.authorization_header !== "undefined") {
+        newDelivery.authorization_header = incoming.authorization_header;
+      }
+
+      s.delivery = newDelivery;
+    }
+
+    // events_requested update (replace)
+    if (updates.events_requested) {
+      s.events_requested = updates.events_requested;
+      s.events_accepted = updates.events_requested;
+      s.events_delivered = updates.events_requested;
+    }
+
+    // allow updating description and status and jwks_uri
+    if ("description" in updates) s.description = updates.description;
+    if ("status" in updates) s.status = updates.status;
+    if ("jwks_uri" in updates) s.jwks_uri = updates.jwks_uri;
+    if ("iss" in updates) s.iss = updates.iss;
+    if ("aud" in updates) s.aud = updates.aud;
+
+    s.updated_at = new Date().toISOString();
+    return res.json(s);
+  } catch (err) {
+    console.error("stream update error:", err.message);
+    return res.status(500).json({ error: "internal_error", message: err.message });
+  }
+}
+
+/* ------------------- DELETE STREAM (POST legacy) ------------------- */
 app.post("/ssf/streams/:id/delete", (req, res) => {
   try {
     const id = req.params.id;
     if (!streams[id]) {
       return res.status(404).json({ error: "stream_not_found" });
     }
-    // actually delete it
+    delete streams[id];
+    return res.status(204).send();
+  } catch (err) {
+    console.error("delete stream error:", err.message);
+    return res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
+
+/* ------------------- DELETE STREAM (DELETE method) ------------------- */
+app.delete("/ssf/streams/:id", (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!streams[id]) {
+      return res.status(404).json({ error: "stream_not_found" });
+    }
     delete streams[id];
     return res.status(204).send();
   } catch (err) {
@@ -312,10 +357,8 @@ app.post("/ssf/streams/verify", async (req, res) => {
   }
 });
 
-/* ------------------- STREAM STATUS (GET summary) ------------------- */
+/* ------------------- STREAM STATUS (GET summary or single) ------------------- */
 app.get("/ssf/status", (req, res) => {
-  // If a stream_id query param is provided, return CAEP-style single-stream status response:
-  // { "status": "enabled" }
   const streamId = req.query.stream_id || req.query.id || null;
   if (streamId) {
     const s = streams[streamId];
@@ -323,7 +366,6 @@ app.get("/ssf/status", (req, res) => {
     return res.status(200).json({ status: s.status });
   }
 
-  // Otherwise return the full summary (backward-compatible)
   const summary = Object.values(streams).map(s => ({
     stream_id: s.stream_id,
     endpoint: s.delivery.endpoint_url,
@@ -339,11 +381,6 @@ app.get("/ssf/status", (req, res) => {
 });
 
 /* ------------------- STREAM STATUS (POST update) ------------------- */
-/*
-  CAEP-ish status update endpoint:
-  Accepts: { "stream_id": "...", "status": "enabled" }
-  Returns updated stream object on success.
-*/
 app.post("/ssf/status", (req, res) => {
   try {
     const { stream_id, status } = req.body || {};
@@ -383,7 +420,6 @@ if (!global.metrics) {
 function logEvent(type, endpoint, resp) {
   const m = global.metrics[type];
   if (!m) {
-    // initialize unknown metric types defensively
     global.metrics[type] = { sent: 0, success: 0, failed: 0 };
   }
   const mm = global.metrics[type];
@@ -608,7 +644,7 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
       return res.status(400).json({ error: "stream_id_or_receiver_url_required" });
     }
 
-    // <<< CAEP spec plural event type >>
+    // CAEP spec plural event type
     const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claims-change";
 
     // Build claims object (preserve provided structure)
