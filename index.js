@@ -1,8 +1,7 @@
 /**
  * Final index.js
- * - Fixes: delete actually deletes
- * - Adds: PATCH /ssf/streams/:id (partial update)
- * - Keeps: all previously agreed CAEP behaviour (verify, status per-stream, token-claims-change, complex sub_id)
+ * - Added support for DELETE /ssf/streams?stream_id=<id>
+ * 
  */
 
 const fs = require("fs");
@@ -301,6 +300,118 @@ app.delete("/ssf/streams/:id", (req, res) => {
   } catch (err) {
     console.error("delete stream error:", err.message);
     return res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
+
+/* ------------------- DELETE STREAM (DELETE with query param) ------------------- */
+app.delete("/ssf/streams", (req, res) => {
+  try {
+    const id = req.query.stream_id || req.query.id || null;
+    if (!id) {
+      return res.status(400).json({ error: "stream_id_query_required" });
+    }
+    if (!streams[id]) {
+      return res.status(404).json({ error: "stream_not_found" });
+    }
+    delete streams[id];
+    return res.status(204).send();
+  } catch (err) {
+    console.error("delete stream error:", err.message);
+    return res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
+
+/* ------------------- BULK UPSERT STREAMS (PUT) ------------------- */
+/*
+  Accepts an array of stream objects (same shape as stored streams).
+  For each item:
+    - if stream_id exists and stream found => update (merge sensible fields)
+    - if stream_id missing or not found => create new stream (use provided stream_id or generate one)
+  Returns 200 with array of upserted streams.
+*/
+app.put("/ssf/streams", (req, res) => {
+  try {
+    const body = req.body;
+    if (!Array.isArray(body)) {
+      return res.status(400).json({ error: "expected_array_of_stream_objects" });
+    }
+
+    const results = body.map((item) => {
+      // Defensive normalize
+      const incoming = item || {};
+      // Use provided id or generate
+      const id = incoming.stream_id || uuidv4();
+
+      // If exists, merge intelligently
+      if (streams[id]) {
+        const s = streams[id];
+
+        // Update simple top-level props if provided
+        if ("iss" in incoming) s.iss = incoming.iss;
+        if ("aud" in incoming) s.aud = incoming.aud;
+        if ("jwks_uri" in incoming) s.jwks_uri = incoming.jwks_uri;
+        if ("description" in incoming) s.description = incoming.description;
+        if ("status" in incoming) s.status = incoming.status;
+
+        // delivery merge (normalize endpoint keys)
+        if (incoming.delivery) {
+          const d = incoming.delivery;
+          const ep = d.endpoint_url || d.endpoint || d.URL || d.url || s.delivery.endpoint_url;
+          s.delivery.method = d.method || s.delivery.method;
+          s.delivery.endpoint_url = ep || s.delivery.endpoint_url;
+          if ("authorization_header" in d) s.delivery.authorization_header = d.authorization_header;
+        }
+
+        // events arrays - if provided replace
+        if (incoming.events_requested) {
+          s.events_requested = incoming.events_requested;
+          s.events_accepted = incoming.events_requested;
+          s.events_delivered = incoming.events_requested;
+        }
+
+        s.updated_at = incoming.updated_at || new Date().toISOString();
+        streams[id] = s;
+        return s;
+      }
+
+      // Create new stream object using provided shape (but ensure required fields and defaults)
+      const now = new Date().toISOString();
+      const delivery = incoming.delivery || {};
+      const endpoint =
+        delivery.endpoint_url ||
+        delivery.endpoint ||
+        delivery.URL ||
+        delivery.url ||
+        null;
+      const method = delivery.method || "push";
+
+      const newStream = {
+        stream_id: id,
+        iss: incoming.iss || ISS,
+        aud: incoming.aud || (incoming.aud === "" ? "" : ISS),
+        jwks_uri: incoming.jwks_uri || `${ISS}/.well-known/jwks.json`,
+        delivery: {
+          method,
+          endpoint_url: endpoint,
+          authorization_header: delivery.authorization_header || "Bearer token123"
+        },
+        events_requested: incoming.events_requested || incoming.events_accepted || incoming.events_delivered || [],
+        events_accepted: incoming.events_accepted || incoming.events_requested || incoming.events_delivered || [],
+        events_delivered: incoming.events_delivered || incoming.events_requested || incoming.events_accepted || [],
+        description: typeof incoming.description !== "undefined" ? incoming.description : null,
+        status: incoming.status || "enabled",
+        created_at: incoming.created_at || now,
+        updated_at: incoming.updated_at || now
+      };
+
+      streams[id] = newStream;
+      return newStream;
+    });
+
+    return res.status(200).json(results);
+  } catch (err) {
+    console.error("PUT /ssf/streams error:", err);
+    return res.status(500).json({ error: "internal_error", message: String(err) });
   }
 });
 
