@@ -1,5 +1,10 @@
 /**
  * Spec-compliant CAEP / SSF Transmitter (transmitter-only)
+ *
+ * Final validated file:
+ *  - /ssf/status?stream_id=<id> -> returns { "status": "<...>" }
+ *  - /ssf/streams/verify -> includes jwks_uri and awaits receiver
+ *  - /caep/send-token-claim-change -> accepts claims object AND complex sub_id (email nested)
  */
 
 const fs = require("fs");
@@ -298,7 +303,6 @@ app.post("/ssf/streams/verify", async (req, res) => {
   }
 });
 
-
 /* ------------------- STREAM STATUS (GET summary) ------------------- */
 app.get("/ssf/status", (req, res) => {
   // If a stream_id query param is provided, return CAEP-style single-stream status response:
@@ -363,7 +367,7 @@ if (!global.metrics) {
     risk: { sent: 0, success: 0, failed: 0 },
     status: { sent: 0, success: 0, failed: 0 },
     device: { sent: 0, success: 0, failed: 0 },
-    token_claim: { sent: 0, success: 0, failed: 0 } // added for token-claim-change events
+    token_claim: { sent: 0, success: 0, failed: 0 }
   };
 }
 
@@ -453,7 +457,6 @@ app.post("/caep/send-risk-level-change", async (req, res) => {
     res.status(500).json({ error: "internal_error", message: err.message });
   }
 });
-
 
 /* ============================================================
    CAEP EVENT: STATUS CHANGE
@@ -570,14 +573,13 @@ app.post("/caep/send-device-compliance-change", async (req, res) => {
 });
 
 /* ============================================================
-   CAEP EVENT: TOKEN CLAIM CHANGE (enhanced; single-claim and claims-object supported,
-   optional initiating_entity/reasons/txn included when provided)
+   CAEP EVENT: TOKEN CLAIM CHANGE (enhanced; claims object + complex sub_id)
    ============================================================ */
 app.post("/caep/send-token-claim-change", async (req, res) => {
   try {
     const { stream_id, receiver_url, payload } = req.body || {};
 
-    // Accept either a single claim (claim_name + current_value) OR a claims object
+    // Accept either a claims object OR a single-claim (claim_name + current_value)
     if (!payload || ( !payload.claims && (!payload.claim_name || (typeof payload.current_value === "undefined" || payload.current_value === null)) )) {
       return res.status(400).json({ error: "payload.claims_or_claim_name_and_current_value_required" });
     }
@@ -599,7 +601,7 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
 
     const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claim-change";
 
-    // Build claims object
+    // Build claims object (preserve provided structure)
     let claimsObj = {};
     if (payload.claims && typeof payload.claims === "object") {
       claimsObj = payload.claims;
@@ -607,7 +609,7 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
       claimsObj[payload.claim_name] = payload.current_value;
     }
 
-    // Build event body including optional fields
+    // Build event body including optional fields exactly as provided
     const eventBody = {
       ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
       ...(payload.initiating_entity ? { initiating_entity: payload.initiating_entity } : {}),
@@ -616,7 +618,7 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
       claims: claimsObj
     };
 
-    // include previous_value field if a single-claim previous_value is provided
+    // include previous_value if single-claim previous_value provided
     if (!payload.claims && typeof payload.previous_value !== "undefined" && payload.previous_value !== null && payload.claim_name) {
       eventBody.previous_value = payload.previous_value;
     }
@@ -624,7 +626,8 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
     const setPayload = {
       iss: ISS,
       aud: payload.aud || DEFAULT_AUD,
-      ...(payload.txn ? { txn: payload.txn } : {}), // include txn at top-level if provided
+      ...(payload.txn ? { txn: payload.txn } : {}), // preserve txn at top-level if provided
+      // Preserve sub_id as-is so complex / nested formats (email nested) are kept
       sub_id: payload.sub_id || (payload.principal ? { format: "opaque", id: payload.principal } : { format: "opaque", id: "unknown" }),
       events: {
         [eventType]: eventBody
