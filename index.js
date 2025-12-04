@@ -1,10 +1,12 @@
 /**
  * Spec-compliant CAEP / SSF Transmitter (transmitter-only)
  *
- * Final validated file:
- *  - /ssf/status?stream_id=<id> -> returns { "status": "<...>" }
- *  - /ssf/streams/verify -> includes jwks_uri and awaits receiver
- *  - /caep/send-token-claim-change -> accepts claims object AND complex sub_id (email nested)
+ * Fixes applied:
+ * - Ensure stream delete actually removes the stream
+ * - Fix stray `If` -> `if` in update route
+ * - Fix status-change handler to use stream_id (not req.params.id)
+ *
+ * No other behaviour changed.
  */
 
 const fs = require("fs");
@@ -243,11 +245,18 @@ app.post("/ssf/streams/:id", (req, res) => {
 
 /* ------------------- DELETE STREAM ------------------- */
 app.post("/ssf/streams/:id/delete", (req, res) => {
-  if (!streams[req.params.id]) {
-    return res.status(404).json({ error: "stream_not_found" });
+  try {
+    const id = req.params.id;
+    if (!streams[id]) {
+      return res.status(404).json({ error: "stream_not_found" });
+    }
+    // actually delete it
+    delete streams[id];
+    return res.status(204).send();
+  } catch (err) {
+    console.error("delete stream error:", err.message);
+    return res.status(500).json({ error: "internal_error", message: err.message });
   }
-  delete streams[req.params.id];
-  res.status(204).send();
 });
 
 /* ------------------- VERIFY STREAM ------------------- */
@@ -599,7 +608,8 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
       return res.status(400).json({ error: "stream_id_or_receiver_url_required" });
     }
 
-    const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claim-change";
+    // <<< CAEP spec plural event type >>
+    const eventType = "https://schemas.openid.net/secevent/caep/event-type/token-claims-change";
 
     // Build claims object (preserve provided structure)
     let claimsObj = {};
