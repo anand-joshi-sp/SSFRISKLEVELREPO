@@ -247,36 +247,70 @@ app.post("/ssf/streams/:id/delete", (req, res) => {
 
 /* ------------------- VERIFY STREAM ------------------- */
 app.post("/ssf/streams/verify", async (req, res) => {
-  const { stream_id } = req.body || {};
-  const s = streams[stream_id];
-  if (!s) return res.status(404).json({ error: "stream_not_found" });
+  try {
+    const { stream_id } = req.body || {};
+    const s = streams[stream_id];
+    if (!s) return res.status(404).json({ error: "stream_not_found" });
 
-  const eventType = "https://schemas.openid.net/secevent/ssf/event-type/verification";
+    const eventType = "https://schemas.openid.net/secevent/ssf/event-type/verification";
 
-  const verifyPayload = {
-    iss: ISS,
-    aud: s.delivery.endpoint_url,
-    sub_id: { format: "opaque", id: stream_id },
-    events: { [eventType]: {} }
-  };
+    // include jwks_uri so receiver can locate our public keys
+    const verifyPayload = {
+      iss: ISS,
+      aud: s.delivery.endpoint_url,
+      jwks_uri: `${ISS}/.well-known/jwks.json`,
+      sub_id: { format: "opaque", id: stream_id },
+      events: { [eventType]: {} }
+    };
 
-  const signed = await signSET(verifyPayload);
+    const signed = await signSET(verifyPayload);
 
-  const headers = {
-    "Content-Type": "application/secevent+jwt",
-    Authorization: s.delivery.authorization_header
-  };
+    const headers = {
+      "Content-Type": "application/secevent+jwt",
+      Authorization: s.delivery.authorization_header
+    };
 
-  axios.post(s.delivery.endpoint_url, signed, { headers })
-    .then(() => console.warn(`🔐 Verification SET sent → ${s.delivery.endpoint_url}`))
-    .catch(err => console.warn(`❌ Verification send failed: ${err.message}`));
+    // Await the receiver's response so we can return useful diagnostics
+    const resp = await axios
+      .post(s.delivery.endpoint_url, signed, { headers, validateStatus: () => true, timeout: 15000 })
+      .catch(e => e.response || { status: 502, data: String(e) });
 
-  res.status(202).json({ message: "verification_sent", stream_id });
+    if (resp.status >= 200 && resp.status < 300) {
+      console.warn(`🔐 Verification SET sent → ${s.delivery.endpoint_url} (status ${resp.status})`);
+      res.status(200).json({
+        message: "verification_sent",
+        stream_id,
+        receiver_status: resp.status,
+        receiver_response: resp.data || null
+      });
+    } else {
+      console.warn(`❌ Verification failed → ${s.delivery.endpoint_url} (status ${resp.status})`);
+      res.status(502).json({
+        error: "verification_failed",
+        stream_id,
+        receiver_status: resp.status,
+        receiver_response: resp.data || null
+      });
+    }
+  } catch (err) {
+    console.error("verify stream error:", err.message);
+    res.status(500).json({ error: "internal_error", message: err.message });
+  }
 });
 
 
 /* ------------------- STREAM STATUS (GET summary) ------------------- */
 app.get("/ssf/status", (req, res) => {
+  // If a stream_id query param is provided, return CAEP-style single-stream status response:
+  // { "status": "enabled" }
+  const streamId = req.query.stream_id || req.query.id || null;
+  if (streamId) {
+    const s = streams[streamId];
+    if (!s) return res.status(404).json({ error: "stream_not_found" });
+    return res.status(200).json({ status: s.status });
+  }
+
+  // Otherwise return the full summary (backward-compatible)
   const summary = Object.values(streams).map(s => ({
     stream_id: s.stream_id,
     endpoint: s.delivery.endpoint_url,
